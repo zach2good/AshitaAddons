@@ -1,0 +1,13 @@
+{
+    "Lua.diagnostics.globals": [
+        "addon",
+        "AshitaCore",
+        "ashita",
+        "ImGuiWindowFlags_AlwaysAutoResize",
+        "ImGuiWindowFlags_NoSavedSettings",
+        "ImGuiWindowFlags_NoFocusOnAppearing",
+        "ImGuiWindowFlags_NoNav",
+        "ImGuiCond_Always",
+        "FLT_MAX"
+    ]
+}
