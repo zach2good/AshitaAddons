@@ -1,5 +1,5 @@
 addon.name    = 'AutoNIN'
-addon.author  = 'zach2good'
+addon.author  = 'zach2good w/ atom0s & Thorny'
 addon.version = '1.0'
 addon.desc    = 'Takes care of the less exciting housekeeping so you can concentrate on hitting your elemental wheel and self-skillchains.'
 addon.link    = ''
@@ -7,57 +7,33 @@ addon.link    = ''
 -- Toggle Shadows on/off with: '/shadows' or 'CTRL+G'
 -- Toggle between Yonin/Innin with: '/stance' or 'SHIFT+G'
 
---[[
-NOTE:
-Shadow recasting relies on you using this block in your LuAshitacast
-
-local cancelShadows = function()
-    local action = gData.GetAction()
-
-    if action.Name == 'Utsusemi: Ichi' then
-        local delay = 1.5
-        if gData.GetBuffCount(66) == 1 then
-            (function() AshitaCore:GetChatManager():QueueCommand(-1, '/cancel 66') end):once(delay)
-        elseif gData.GetBuffCount(444) == 1 then
-            (function() AshitaCore:GetChatManager():QueueCommand(-1, '/cancel 444') end):once(delay)
-        elseif gData.GetBuffCount(445) == 1 then
-            (function() AshitaCore:GetChatManager():QueueCommand(-1, '/cancel 445') end):once(delay)
-        elseif gData.GetBuffCount(446) == 1 then
-            (function() AshitaCore:GetChatManager():QueueCommand(-1, '/cancel 446') end):once(delay)
-        end
-    end
-
-    if action.Name == 'Utsusemi: Ni' then
-        local delay = 0.5
-        if gData.GetBuffCount(66) == 1 then
-            (function() AshitaCore:GetChatManager():QueueCommand(-1, '/cancel 66') end):once(delay)
-        elseif gData.GetBuffCount(444) == 1 then
-            (function() AshitaCore:GetChatManager():QueueCommand(-1, '/cancel 444') end):once(delay)
-        elseif gData.GetBuffCount(445) == 1 then
-            (function() AshitaCore:GetChatManager():QueueCommand(-1, '/cancel 445') end):once(delay)
-        elseif gData.GetBuffCount(446) == 1 then
-            (function() AshitaCore:GetChatManager():QueueCommand(-1, '/cancel 446') end):once(delay)
-        end
-    end
-end
-]]
-
 require('common')
 local imgui = require('imgui')
 
 local state =
 {
     -- Running state
-    loop_interval = 0.1,
-    last_tick     = 0,
-    next_action   = 0,
-    keys_down     = {},
+    enabled          = true,
+    loop_interval    = 0.25,
+    last_tick        = 0,
+    next_action      = 0,
+    keys_down        = {},
+    last_cancel      = 0,
+    player_x         = 0,
+    player_y         = 0,
+    player_z         = 0,
+    is_moving        = false,
 
     -- Starting state
-    shadow_recast_num = 1,
-    tool_threshold    = 10,
     handle_shadows    = true,
     stance            = "Yonin",
+    handle_kakka      = false,
+    handle_gekka      = false,
+    handle_migawari   = false,
+    handle_food       = true,
+    handle_tools      = true,
+    shadow_recast_num = 1,
+    tool_threshold    = 10,
     shihei_count      = 0,
     ino_count         = 0,
     shika_count       = 0,
@@ -68,11 +44,31 @@ local state =
     cho_bag_count     = 0,
     food              = "Sole Sushi",
     food_count        = 0,
+    ichi_cancel_delay = 1.5,
+    ni_cancel_delay   = 0.5,
 }
 
-local VK_SHIFT     = 0x10
-local VK_CONTROL   = 0x11
-local VK_G_KEY     = 0x47
+local VK_SHIFT   = 0x10
+local VK_CONTROL = 0x11
+local VK_G_KEY   = 0x47
+
+local SPELL_UTSUSEMI_ICHI = 338
+local SPELL_UTSUSEMI_NI   = 339
+local SPELL_UTSUSEMI_SAN  = 340
+local SPELL_GEKKA         = 505
+local SPELL_KAKKA         = 509
+local SPELL_MIGAWARI      = 510
+
+local BUFF_COPY_IMAGE_1 = 66
+local BUFF_STORE_TP     = 227
+local BUFF_FOOD         = 251
+local BUFF_MOUNTED      = 252
+local BUFF_YONIN        = 420
+local BUFF_INNIN        = 421
+local BUFF_COPY_IMAGE_2 = 444
+local BUFF_COPY_IMAGE_3 = 445
+local BUFF_COPY_IMAGE_4 = 446
+local BUFF_MIGAWARI     = 471
 
 local ITEM_SHIHEI          = 1179
 local ITEM_INOSHISHINOFUDA = 2971
@@ -82,7 +78,8 @@ local ITEM_TOOLBAG_SHIHE   = 5314
 local ITEM_TOOLBAG_INO     = 5867
 local ITEM_TOOLBAG_SHIKA   = 5868
 local ITEM_TOOLBAG_CHO     = 5869
-local ITEM_SOLE_SUSHI      = 5149
+
+local ITEM_SOLE_SUSHI = 5149
 
 local INACTIVE_ZONES =
 {
@@ -128,30 +125,81 @@ local INACTIVE_ZONES =
     ZONE_FERETORY                  = 285,
 }
 
-local function btos(b)
-    if b then
-        return "True"
+local get_buff_count = function(matchBuff)
+    local count = 0
+    local buffs = AshitaCore:GetMemoryManager():GetPlayer():GetBuffs()
+    if type(matchBuff) == 'string' then
+        local matchText = string.lower(matchBuff)
+        for _, buff in pairs(buffs) do
+            local buffString = AshitaCore:GetResourceManager():GetString("buffs.names", buff)
+			if buffString ~= nil and string.lower(buffString) == matchText then
+                count = count + 1
+            end
+        end
+    elseif type(matchBuff) == 'number' then
+        for _, buff in pairs(buffs) do
+            if buff == matchBuff then
+                count = count + 1
+            end
+        end
     end
-    return "False"
+    return count
 end
 
-local function send(command)
+-- /cancel logic taken from atom0s's 'debuff' addon
+local cancel_buff = function(id)
+    -- Make sure we only send one cancel packet every 2 seconds
+    local now  = os.clock()
+    if state.last_cancel + 2 > now then
+        return
+    end
+
+    -- Handle invalid status id/name
+    if id == nil or id <= 0 then
+        return
+    end
+
+    -- Inject the status cancel packet
+    local p = struct.pack("bbbbhbb", 0xF1, 0x04, 0x00, 0x00, id, 0x00, 0x00):totable()
+    AshitaCore:GetPacketManager():AddOutgoingPacket(0xF1, p)
+end
+
+local cancel_shadows = function(id)
+    local delay = 0
+
+    if id == SPELL_UTSUSEMI_ICHI then delay = state.ichi_cancel_delay end -- Utsusemi: Ichi
+    if id == SPELL_UTSUSEMI_NI then delay = state.ni_cancel_delay end -- Utsusemi: Ni
+
+    if id == SPELL_UTSUSEMI_ICHI then
+        if get_buff_count(BUFF_COPY_IMAGE_1) == 1 then
+            (function() cancel_buff(BUFF_COPY_IMAGE_1) end):once(delay)
+        elseif get_buff_count(BUFF_COPY_IMAGE_2) == 1 then
+            (function() cancel_buff(BUFF_COPY_IMAGE_2) end):once(delay)
+        elseif get_buff_count(BUFF_COPY_IMAGE_3) == 1 then
+            (function() cancel_buff(BUFF_COPY_IMAGE_3) end):once(delay)
+        elseif get_buff_count(BUFF_COPY_IMAGE_4) == 1 then
+            (function() cancel_buff(BUFF_COPY_IMAGE_4) end):once(delay)
+        end
+    end
+end
+
+local send = function(command)
     AshitaCore:GetChatManager():QueueCommand(1, command)
 end
 
-local function is_logged_in()
+local is_logged_in = function()
     return AshitaCore:GetMemoryManager():GetPlayer():GetLoginStatus() == 2
 end
 
-local function is_zoning()
+local is_zoning = function()
     return AshitaCore:GetMemoryManager():GetPlayer():GetIsZoning() > 0
 end
 
-local function get_zone_id()
+local get_zone_id = function()
     return AshitaCore:GetMemoryManager():GetParty():GetMemberZone(0)
 end
 
-local function in_inactive_zone()
+local in_inactive_zone = function()
     for _, zone_id in pairs(INACTIVE_ZONES) do
         if get_zone_id() == zone_id then
             return true
@@ -160,37 +208,70 @@ local function in_inactive_zone()
     return false
 end
 
-local function is_nin_main()
+local is_nin_main = function()
     return AshitaCore:GetMemoryManager():GetPlayer():GetMainJob() == 13
 end
 
-local function is_valid_state()
+local is_valid_state = function()
     local player_index  = AshitaCore:GetMemoryManager():GetParty():GetMemberIndex(0)
     local player_status = AshitaCore:GetMemoryManager():GetEntity():GetStatus(player_index)
     return true
     -- TODO: return player_status == 1 or player_status == 2 -- Idle or Combat, anything else is invalid
-    -- TODO: Handle movement do you don't cast on the run
 end
 
-local function toggle_shadows()
+local toggle_enabled = function()
+    state.enabled = not state.enabled
+    print(string.format("AutoNIN Enabled: %s", state.enabled))
+end
+
+local toggle_shadows = function()
     state.handle_shadows = not state.handle_shadows
-    print(string.format("AutoNIN Auto-Shadows: %s", btos(state.handle_shadows)))
+    print(string.format("AutoNIN Auto-Shadows: %s", state.handle_shadows))
 end
 
-local function toggle_stance()
+local toggle_stance = function()
     if state.stance == "Yonin" then
         state.stance = "Innin"
-    else
+    elseif state.stance == "Innin" then
+        state.stance = "None"
+    elseif state.stance == "None" then
         state.stance = "Yonin"
     end
     print(string.format("AutoNIN Auto-Stance: %s", state.stance))
 end
 
-local function tick()
-    local player = AshitaCore:GetMemoryManager():GetPlayer()
-    local player_index  = AshitaCore:GetMemoryManager():GetParty():GetMemberIndex(0)
-    local player_hpp    = AshitaCore:GetMemoryManager():GetParty():GetMemberHPPercent(0)
-    local player_tp     = AshitaCore:GetMemoryManager():GetParty():GetMemberTP(player_index)
+local toggle_kakka = function()
+    state.handle_kakka = not state.handle_kakka
+    print(string.format("AutoNIN Auto-Kakka: %s", state.handle_kakka))
+end
+
+local toggle_gekka = function()
+    state.handle_gekka = not state.handle_gekka
+    print(string.format("AutoNIN Auto-Gekka: %s", state.handle_gekka))
+end
+
+local toggle_migawari = function()
+    state.handle_migawari = not state.handle_migawari
+    print(string.format("AutoNIN Auto-Migawari: %s", state.handle_migawari))
+end
+
+local toggle_food = function()
+    state.handle_food = not state.handle_food
+    print(string.format("AutoNIN Auto-Food: %s", state.handle_food))
+end
+
+local toggle_tools = function()
+    state.handle_tools = not state.handle_tools
+    print(string.format("AutoNIN Auto-Tools: %s", state.handle_tools))
+end
+
+local tick = function()
+    local player       = AshitaCore:GetMemoryManager():GetPlayer()
+    local party        = AshitaCore:GetMemoryManager():GetParty()
+    local player_index = party:GetMemberTargetIndex(0)
+    local player_hpp   = AshitaCore:GetMemoryManager():GetParty():GetMemberHPPercent(0)
+    local player_level = AshitaCore:GetMemoryManager():GetPlayer():GetMainJobLevel()
+    -- local player_tp    = AshitaCore:GetMemoryManager():GetParty():GetMemberTP(player_index)
 
     local now  = os.clock()
     local shadows_left = 0
@@ -228,28 +309,28 @@ local function tick()
         local buff_id = buffs[i]
 
         -- Copy Image
-        if buff_id == 66 then shadows_left = 1 end
-        if buff_id == 444 then shadows_left = 2 end
-        if buff_id == 445 then shadows_left = 3 end
-        if buff_id == 446 then shadows_left = 4 end
+        if buff_id == BUFF_COPY_IMAGE_1 then shadows_left = 1 end
+        if buff_id == BUFF_COPY_IMAGE_2 then shadows_left = 2 end
+        if buff_id == BUFF_COPY_IMAGE_3 then shadows_left = 3 end
+        if buff_id == BUFF_COPY_IMAGE_4 then shadows_left = 4 end
 
         -- Yonin
-        if buff_id == 420 then has_yonin = true end
+        if buff_id == BUFF_YONIN then has_yonin = true end
 
         -- Innin
-        if buff_id == 421 then has_innin = true end
+        if buff_id == BUFF_INNIN then has_innin = true end
 
         -- Store TP
-        if buff_id == 227 then has_store_tp = true end
+        if buff_id == BUFF_STORE_TP then has_store_tp = true end
 
         -- Store TP
-        if buff_id == 471 then has_migawari = true end
+        if buff_id == BUFF_MIGAWARI then has_migawari = true end
 
         -- Food
-        if buff_id == 251 then has_food = true end
+        if buff_id == BUFF_FOOD then has_food = true end
 
         -- Mounted
-        if buff_id == 252 then is_mounted = true end
+        if buff_id == BUFF_MOUNTED then is_mounted = true end
     end
 
     -- Items
@@ -274,12 +355,32 @@ local function tick()
     state.shika_bag_count  = items[ITEM_TOOLBAG_SHIKA] or 0
     state.cho_bag_count    = items[ITEM_TOOLBAG_CHO] or 0
 
+    state.is_moving = false
+
+    local player_x = AshitaCore:GetMemoryManager():GetEntity():GetLocalPositionX(player_index)
+    local player_y = AshitaCore:GetMemoryManager():GetEntity():GetLocalPositionY(player_index)
+    local player_z = AshitaCore:GetMemoryManager():GetEntity():GetLocalPositionZ(player_index)
+
+    if
+        state.player_x ~= player_x or
+        state.player_y ~= player_y or
+        state.player_z ~= player_z
+    then
+        state.is_moving = true
+    end
+
+    state.player_x = player_x
+    state.player_y = player_y
+    state.player_z = player_z
+
     -- Look for reasons to bail out now
     if
+        not state.enabled or
         in_inactive_zone() or
         not is_valid_state() or
         is_mounted or
-        player_hpp == 0
+        player_hpp == 0 or
+        state.is_moving
     then
         return
     end
@@ -287,83 +388,103 @@ local function tick()
     -- Take actions
     if now > state.next_action then
         -- Shadows
-        -- TODO: Watch incoming packets and count when we get to 1 shadow remaining.
-        -- Thats when we should start casting (required pre-cancelling in luashitacast)
-        if state.handle_shadows and not shadows_left <= state.shadow_recast_num then
-            local can_cast_san = player:GetJobPointsSpent(13) >= 100 and is_nin_main() and player:HasSpell(340)
-            if can_cast_san and spell_recasts[340] == nil then
+        if state.handle_shadows and shadows_left <= state.shadow_recast_num then
+            local can_cast_san = player:GetJobPointsSpent(13) >= 100 and is_nin_main() and player:HasSpell(SPELL_UTSUSEMI_SAN)
+            if can_cast_san and spell_recasts[SPELL_UTSUSEMI_SAN] == nil then
+                -- No need to cancel shadows
                 send('/ma "Utsusemi: San" <me>')
                 state.next_action = now + 2.0
                 return
-            elseif player:HasSpell(339) and spell_recasts[339] == nil then
+            elseif player:HasSpell(SPELL_UTSUSEMI_NI) and spell_recasts[SPELL_UTSUSEMI_NI] == nil then
+                cancel_shadows(SPELL_UTSUSEMI_NI)
                 send('/ma "Utsusemi: Ni" <me>')
                 state.next_action = now + 5.0
                 return
-            elseif player:HasSpell(338) and spell_recasts[338] == nil then
+            elseif player:HasSpell(SPELL_UTSUSEMI_ICHI) and spell_recasts[SPELL_UTSUSEMI_ICHI] == nil then
+                cancel_shadows(SPELL_UTSUSEMI_ICHI)
                 send('/ma "Utsusemi: Ichi" <me>')
                 state.next_action = now + 7.5
                 return
             end
         end
 
-        -- Stances
-        if is_nin_main() and state.stance == "Yonin" and not has_yonin and ability_recasts[1] == 0 then
+        -- Stances (lv40)
+        if player_level >= 40 and is_nin_main() and state.stance == "Yonin" and not has_yonin and ability_recasts[1] == 0 then
             send('/ja "Yonin" <me>')
             state.next_action = now + 2.0
             return
-        elseif is_nin_main() and state.stance == "Innin" and not has_innin and ability_recasts[2] == 0 then
+        elseif player_level >= 40 and is_nin_main() and state.stance == "Innin" and not has_innin and ability_recasts[2] == 0 then
             send('/ja "Innin" <me>')
             state.next_action = now + 2.0
             return
         end
 
-        -- Kakka: Ichi
-        if is_nin_main() and not has_store_tp and spell_recasts[509] == nil then
-            send('/ma "Kakka: Ichi" <me>')
-            state.next_action = now + 4.0
-            return
+        -- Migawari: Ichi (lv88)
+        if state.handle_migawari then
+            if player_level >= 88 and player:HasSpell(SPELL_MIGAWARI) and is_nin_main() and not has_migawari and spell_recasts[SPELL_MIGAWARI] == nil then
+                send('/ma "Migawari: Ichi" <me>')
+                state.next_action = now + 4.0
+                return
+            end
         end
 
-        -- Migawari: Ichi
-        if is_nin_main() and not has_migawari and spell_recasts[510] == nil then
-            send('/ma "Migawari: Ichi" <me>')
-            state.next_action = now + 4.0
-            return
+        -- Kakka: Ichi (lv93)
+        if state.handle_kakka then
+            if player_level >= 93 and player:HasSpell(SPELL_KAKKA) and is_nin_main() and not has_store_tp and spell_recasts[SPELL_KAKKA] == nil then
+                send('/ma "Kakka: Ichi" <me>')
+                state.next_action = now + 4.0
+                return
+            end
+        end
+
+        -- Gekka: Ichi (lv88)
+        if state.handle_gekka then
+            if player_level >= 88 and player:HasSpell(SPELL_GEKKA) and is_nin_main() and not has_store_tp and spell_recasts[SPELL_GEKKA] == nil then
+                send('/ma "Kakka: Ichi" <me>')
+                state.next_action = now + 4.0
+                return
+            end
         end
 
         -- Items
-        if is_nin_main() and state.ino_count < state.tool_threshold and state.ino_bag_count > 0 then
-            send('/item "Toolbag (Ino)" <me>')
-            state.next_action = now + 5.0
-            return
-        elseif is_nin_main() and state.shika_count < state.tool_threshold and state.shika_bag_count > 0 then
-            send('/item "Toolbag (Shika)" <me>')
-            state.next_action = now + 5.0
-            return
-        elseif is_nin_main() and state.cho_count < state.tool_threshold and state.cho_bag_count >0 then
-            send('/item "Toolbag (Cho)" <me>')
-            state.next_action = now + 5.0
-            return
-        elseif not is_nin_main() and state.shihei_count < state.tool_threshold and state.shihei_bag_count > 0 then
-            send('/item "Toolbag (Shihei)" <me>')
-            state.next_action = now + 5.0
-            return
+        if state.handle_tools then
+            if is_nin_main() and state.ino_count < state.tool_threshold and state.ino_bag_count > 0 then
+                send('/item "Toolbag (Ino)" <me>')
+                state.next_action = now + 5.0
+                return
+            elseif is_nin_main() and state.shika_count < state.tool_threshold and state.shika_bag_count > 0 then
+                send('/item "Toolbag (Shika)" <me>')
+                state.next_action = now + 5.0
+                return
+            elseif is_nin_main() and state.cho_count < state.tool_threshold and state.cho_bag_count >0 then
+                send('/item "Toolbag (Cho)" <me>')
+                state.next_action = now + 5.0
+                return
+            elseif not is_nin_main() and state.shihei_count < state.tool_threshold and state.shihei_bag_count > 0 then
+                send('/item "Toolbag (Shihei)" <me>')
+                state.next_action = now + 5.0
+                return
+            end
         end
 
         -- Food
-        if not has_food and state.food_count > 0 then
-            send(string.format('/item "%s" <me>', state.food))
-            state.next_action = now + 5.0
-            return
+        if state.handle_food then
+            if not has_food and state.food_count > 0 then
+                send(string.format('/item "%s" <me>', state.food))
+                state.next_action = now + 5.0
+                return
+            end
         end
     end
 end
 
-local function draw_ui()
+local draw_ui = function()
+    local enabled = state.enabled and not in_inactive_zone() and not state.is_moving
+
     local WHITE_OR_GREY = { 1.0,  1.0,  1.0, 1.0 }
     local CORAL_OR_GREY = { 1.0, 0.65, 0.26, 1.0 }
 
-    if in_inactive_zone() then
+    if not enabled then
         WHITE_OR_GREY = { 0.7,  0.7,  0.7, 0.7 }
         CORAL_OR_GREY = { 0.7,  0.7,  0.7, 0.7 }
     end
@@ -380,10 +501,22 @@ local function draw_ui()
     imgui.SetNextWindowSizeConstraints({ -1, -1, }, { FLT_MAX, FLT_MAX, })
 
     if imgui.Begin('AutoNIN', true, flags) then
-        if not in_inactive_zone() then
+        if enabled then
             imgui.TextColored(CORAL_OR_GREY, 'AutoNIN (active)')
         else
-            imgui.TextColored(CORAL_OR_GREY, 'AutoNIN (inactive zone)')
+            imgui.TextColored(CORAL_OR_GREY, 'AutoNIN (inactive)')
+        end
+
+        imgui.SameLine()
+        local icon = '+'
+        if state.enabled then icon = '-' end
+        if imgui.Button(icon) then
+            toggle_enabled()
+        end
+
+        if not enabled then
+            imgui.End()
+            return
         end
 
         imgui.Separator()
@@ -408,24 +541,87 @@ local function draw_ui()
 
             imgui.SameLine()
             imgui.Spacing()
+            imgui.SameLine()
+
+            if imgui.Button('Tools') then
+                toggle_tools()
+            end
+
+            -- New Line
+
+            imgui.Spacing()
+            imgui.SameLine()
+            imgui.Spacing()
+            imgui.SameLine()
+
+            if imgui.Button('Kakka') then
+                toggle_kakka()
+            end
+
+            imgui.SameLine()
+            imgui.Spacing()
+            imgui.SameLine()
+            imgui.Spacing()
+            imgui.SameLine()
+            imgui.Spacing()
+            imgui.SameLine()
+
+            if imgui.Button('Gekka') then
+                toggle_gekka()
+            end
+
+            imgui.SameLine()
+            imgui.Spacing()
+            imgui.SameLine()
+            imgui.Spacing()
+            imgui.SameLine()
+
+            if imgui.Button('Food') then
+                toggle_food()
+            end
+
+            imgui.SameLine()
+            imgui.Spacing()
+
+            -- New Line
+
+            imgui.Spacing()
+            imgui.SameLine()
+            imgui.Spacing()
+            imgui.SameLine()
+
+            if imgui.Button('Migawari') then
+                toggle_migawari()
+            end
+
+            imgui.SameLine()
+            imgui.Spacing()
         imgui.EndGroup()
 
         imgui.Separator()
 
         imgui.BeginGroup()
-            imgui.TextColored(WHITE_OR_GREY, string.format("Shadows: %s (CTRL+G)", btos(state.handle_shadows)))
-            imgui.TextColored(WHITE_OR_GREY, string.format("Stance: %s (SHIFT+G)", state.stance))
-            imgui.TextColored(WHITE_OR_GREY, string.format("Ino: %i (bags: %i)", state.ino_count, state.ino_bag_count * 99))
-            imgui.TextColored(WHITE_OR_GREY, string.format("Shika: %i (bags: %i)", state.shika_count, state.shika_bag_count * 99))
-            imgui.TextColored(WHITE_OR_GREY, string.format("Cho: %i (bags: %i)", state.cho_count, state.cho_bag_count * 99))
-            imgui.TextColored(WHITE_OR_GREY, string.format("Shihei: %i (bags: %i)", state.shihei_count, state.shihei_bag_count * 99))
-            imgui.TextColored(WHITE_OR_GREY, string.format("Food: %i (%s)", state.food_count, "Sole Sushi"))
+            imgui.TextColored(WHITE_OR_GREY, string.format("Shadows  : %s", state.handle_shadows))
+            imgui.TextColored(WHITE_OR_GREY, string.format("Stance   : %s (SHIFT+G)", state.stance))
+            imgui.TextColored(WHITE_OR_GREY, string.format("Tools    : %s", state.handle_tools))
+            imgui.TextColored(WHITE_OR_GREY, string.format("Kakka    : %s", state.handle_kakka))
+            imgui.TextColored(WHITE_OR_GREY, string.format("Gekka    : %s", state.handle_gekka))
+            imgui.TextColored(WHITE_OR_GREY, string.format("Food     : %s", state.handle_food))
+            imgui.TextColored(WHITE_OR_GREY, string.format("Migawari : %s", state.handle_migawari))
+
+            imgui.Separator()
+
+            imgui.TextColored(WHITE_OR_GREY, string.format("Ino      : %i (bags: %i)", state.ino_count, state.ino_bag_count * 99))
+            imgui.TextColored(WHITE_OR_GREY, string.format("Shika    : %i (bags: %i)", state.shika_count, state.shika_bag_count * 99))
+            imgui.TextColored(WHITE_OR_GREY, string.format("Cho      : %i (bags: %i)", state.cho_count, state.cho_bag_count * 99))
+            imgui.TextColored(WHITE_OR_GREY, string.format("Shihei   : %i (bags: %i)", state.shihei_count, state.shihei_bag_count * 99))
+            imgui.TextColored(WHITE_OR_GREY, string.format("Food     : %i (%s)", state.food_count, state.food))
         imgui.EndGroup()
     end
     imgui.End()
 end
 
-ashita.events.register('load', 'load_cb', function ()
+ashita.events.register('load', 'load_cb', function()
 end)
 
 ashita.events.register('key', 'key_callback', function(e)
@@ -450,6 +646,19 @@ ashita.events.register('command', 'command_cb', function(e)
         toggle_stance()
         e.blocked = true
         return
+    end
+end)
+
+-- Action packet logic from Thorny's luashitacast
+ashita.events.register('packet_out', 'packet_out_cb', function(e)
+    if e.id == 0x1A then
+        local packet   = struct.unpack('c' .. e.size, e.data, 1)
+        local category = struct.unpack('H', packet, 0x0A + 0x01)
+
+        if category == 0x03 then -- Spell
+            local spellId = struct.unpack('H', packet, 0x0C + 0x01)
+            cancel_shadows(spellId)
+        end
     end
 end)
 

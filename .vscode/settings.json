@@ -8,6 +8,10 @@
         "ImGuiWindowFlags_NoFocusOnAppearing",
         "ImGuiWindowFlags_NoNav",
         "ImGuiCond_Always",
-        "FLT_MAX"
+        "FLT_MAX",
+        "struct",
+        "ImGuiWindowFlags_NoDecoration",
+        "GetEntity",
+        "T"
     ]
 }
