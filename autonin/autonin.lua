@@ -32,6 +32,7 @@ local state =
     handle_migawari   = false,
     handle_food       = true,
     handle_tools      = true,
+    handle_ws         = false,
     shadow_recast_num = 1,
     tool_threshold    = 10,
     shihei_count      = 0,
@@ -44,13 +45,12 @@ local state =
     cho_bag_count     = 0,
     food              = "Sole Sushi",
     food_count        = 0,
-    ichi_cancel_delay = 1.5,
-    ni_cancel_delay   = 0.5,
+    weaponskill       = "Blade: Hi",
 }
 
-local VK_SHIFT   = 0x10
-local VK_CONTROL = 0x11
-local VK_G_KEY   = 0x47
+local VK_SHIFT     = 0x10
+local VK_CONTROL   = 0x11
+local VK_G_KEY     = 0x47
 
 local SPELL_UTSUSEMI_ICHI = 338
 local SPELL_UTSUSEMI_NI   = 339
@@ -60,15 +60,16 @@ local SPELL_KAKKA         = 509
 local SPELL_MIGAWARI      = 510
 
 local BUFF_COPY_IMAGE_1 = 66
-local BUFF_STORE_TP     = 227
-local BUFF_FOOD         = 251
-local BUFF_MOUNTED      = 252
-local BUFF_YONIN        = 420
-local BUFF_INNIN        = 421
 local BUFF_COPY_IMAGE_2 = 444
 local BUFF_COPY_IMAGE_3 = 445
 local BUFF_COPY_IMAGE_4 = 446
-local BUFF_MIGAWARI     = 471
+
+local BUFF_YONIN    = 420
+local BUFF_INNIN    = 421
+local BUFF_STORE_TP = 227
+local BUFF_MIGAWARI = 471
+local BUFF_FOOD     = 251
+local BUFF_MOUNTED  = 252
 
 local ITEM_SHIHEI          = 1179
 local ITEM_INOSHISHINOFUDA = 2971
@@ -78,8 +79,7 @@ local ITEM_TOOLBAG_SHIHE   = 5314
 local ITEM_TOOLBAG_INO     = 5867
 local ITEM_TOOLBAG_SHIKA   = 5868
 local ITEM_TOOLBAG_CHO     = 5869
-
-local ITEM_SOLE_SUSHI = 5149
+local ITEM_SOLE_SUSHI      = 5149
 
 local INACTIVE_ZONES =
 {
@@ -162,25 +162,22 @@ local cancel_buff = function(id)
     -- Inject the status cancel packet
     local p = struct.pack("bbbbhbb", 0xF1, 0x04, 0x00, 0x00, id, 0x00, 0x00):totable()
     AshitaCore:GetPacketManager():AddOutgoingPacket(0xF1, p)
+    state.last_cancel = now
 end
 
 local cancel_shadows = function(id)
-    local delay = 0
+    local delay = 0.0
 
-    if id == SPELL_UTSUSEMI_ICHI then delay = state.ichi_cancel_delay end -- Utsusemi: Ichi
-    if id == SPELL_UTSUSEMI_NI then delay = state.ni_cancel_delay end -- Utsusemi: Ni
+    if id == SPELL_UTSUSEMI_ICHI then delay = 1.0
+    elseif id == SPELL_UTSUSEMI_NI then delay = 0.0
+    else return end
 
-    if id == SPELL_UTSUSEMI_ICHI then
-        if get_buff_count(BUFF_COPY_IMAGE_1) == 1 then
-            (function() cancel_buff(BUFF_COPY_IMAGE_1) end):once(delay)
-        elseif get_buff_count(BUFF_COPY_IMAGE_2) == 1 then
-            (function() cancel_buff(BUFF_COPY_IMAGE_2) end):once(delay)
-        elseif get_buff_count(BUFF_COPY_IMAGE_3) == 1 then
-            (function() cancel_buff(BUFF_COPY_IMAGE_3) end):once(delay)
-        elseif get_buff_count(BUFF_COPY_IMAGE_4) == 1 then
-            (function() cancel_buff(BUFF_COPY_IMAGE_4) end):once(delay)
-        end
-    end
+    ashita.tasks.once(delay, function()
+        cancel_buff(BUFF_COPY_IMAGE_1)
+        cancel_buff(BUFF_COPY_IMAGE_2)
+        cancel_buff(BUFF_COPY_IMAGE_3)
+        cancel_buff(BUFF_COPY_IMAGE_4)
+    end)
 end
 
 local send = function(command)
@@ -265,13 +262,18 @@ local toggle_tools = function()
     print(string.format("AutoNIN Auto-Tools: %s", state.handle_tools))
 end
 
+local toggle_ws = function()
+    state.handle_ws = not state.handle_ws
+    print(string.format("AutoNIN Auto-WS: %s", state.handle_ws))
+end
+
 local tick = function()
     local player       = AshitaCore:GetMemoryManager():GetPlayer()
     local party        = AshitaCore:GetMemoryManager():GetParty()
     local player_index = party:GetMemberTargetIndex(0)
     local player_hpp   = AshitaCore:GetMemoryManager():GetParty():GetMemberHPPercent(0)
+    local player_tp    = AshitaCore:GetMemoryManager():GetParty():GetMemberTP(0)
     local player_level = AshitaCore:GetMemoryManager():GetPlayer():GetMainJobLevel()
-    -- local player_tp    = AshitaCore:GetMemoryManager():GetParty():GetMemberTP(player_index)
 
     local now  = os.clock()
     local shadows_left = 0
@@ -382,6 +384,7 @@ local tick = function()
         player_hpp == 0 or
         state.is_moving
     then
+        state.next_action = now + 2.0
         return
     end
 
@@ -391,21 +394,23 @@ local tick = function()
         if state.handle_shadows and shadows_left <= state.shadow_recast_num then
             local can_cast_san = player:GetJobPointsSpent(13) >= 100 and is_nin_main() and player:HasSpell(SPELL_UTSUSEMI_SAN)
             if can_cast_san and spell_recasts[SPELL_UTSUSEMI_SAN] == nil then
-                -- No need to cancel shadows
                 send('/ma "Utsusemi: San" <me>')
-                state.next_action = now + 2.0
+                state.next_action = now + 3.0
                 return
             elseif player:HasSpell(SPELL_UTSUSEMI_NI) and spell_recasts[SPELL_UTSUSEMI_NI] == nil then
-                cancel_shadows(SPELL_UTSUSEMI_NI)
                 send('/ma "Utsusemi: Ni" <me>')
                 state.next_action = now + 5.0
                 return
             elseif player:HasSpell(SPELL_UTSUSEMI_ICHI) and spell_recasts[SPELL_UTSUSEMI_ICHI] == nil then
-                cancel_shadows(SPELL_UTSUSEMI_ICHI)
                 send('/ma "Utsusemi: Ichi" <me>')
-                state.next_action = now + 7.5
+                state.next_action = now + 7.0
                 return
             end
+        end
+
+        if state.handle_ws and state.weaponskill and player_tp > 1000 then
+            send(string.format('/ws "%s" <t>', state.weaponskill))
+            return
         end
 
         -- Stances (lv40)
@@ -596,6 +601,16 @@ local draw_ui = function()
 
             imgui.SameLine()
             imgui.Spacing()
+            imgui.SameLine()
+            imgui.Spacing()
+            imgui.SameLine()
+
+            if imgui.Button('WS') then
+                toggle_ws()
+            end
+
+            imgui.SameLine()
+            imgui.Spacing()
         imgui.EndGroup()
 
         imgui.Separator()
@@ -608,6 +623,7 @@ local draw_ui = function()
             imgui.TextColored(WHITE_OR_GREY, string.format("Gekka    : %s", state.handle_gekka))
             imgui.TextColored(WHITE_OR_GREY, string.format("Food     : %s", state.handle_food))
             imgui.TextColored(WHITE_OR_GREY, string.format("Migawari : %s", state.handle_migawari))
+            imgui.TextColored(WHITE_OR_GREY, string.format("WS       : %s", state.handle_ws))
 
             imgui.Separator()
 
